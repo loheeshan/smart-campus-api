@@ -1,5 +1,7 @@
 package com.westminster.smartcampus.resource;
 
+import com.westminster.smartcampus.dto.ErrorResponse;
+import com.westminster.smartcampus.exception.LinkedResourceNotFoundException;
 import com.westminster.smartcampus.model.Room;
 import com.westminster.smartcampus.model.Sensor;
 import com.westminster.smartcampus.store.RoomStore;
@@ -13,6 +15,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -21,19 +24,8 @@ import jakarta.ws.rs.core.UriInfo;
 
 import java.net.URI;
 import java.util.Collection;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.UUID;
 
-/**
- * Manages the /sensors collection.
- *
- * GET /sensors -> list all sensors (filter by ?type=...)
- * GET /sensors/{sensorId} -> fetch a specific sensor
- * POST /sensors -> create (validates roomId exists)
- * DELETE /sensors/{sensorId} -> remove, detaches from parent room
- * {sensorId}/readings -> delegated to SensorReadingResource
- */
 @Path("/sensors")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
@@ -58,7 +50,7 @@ public class SensorResource {
     public Response getSensorById(@PathParam("sensorId") String sensorId) {
         Sensor sensor = sensorStore.findById(sensorId);
         if (sensor == null) {
-            return notFound("Sensor with id '" + sensorId + "' does not exist.");
+            throw notFound("Sensor with id '" + sensorId + "' does not exist.");
         }
         return Response.ok(sensor).build();
     }
@@ -66,21 +58,16 @@ public class SensorResource {
     @POST
     public Response createSensor(Sensor sensor, @Context UriInfo uriInfo) {
         if (sensor == null || sensor.getType() == null || sensor.getType().isBlank()) {
-            return badRequest("Field 'type' is required.");
+            throw badRequest("Field 'type' is required.");
         }
         if (sensor.getRoomId() == null || sensor.getRoomId().isBlank()) {
-            return badRequest("Field 'roomId' is required.");
+            throw badRequest("Field 'roomId' is required.");
         }
 
         Room room = roomStore.findById(sensor.getRoomId());
         if (room == null) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", 422);
-            body.put("error", "Unprocessable Entity");
-            body.put("message",
-                    "Cannot register sensor: referenced room '"
-                            + sensor.getRoomId() + "' does not exist.");
-            return Response.status(422).entity(body).build();
+            // Thrown -> intercepted by LinkedResourceNotFoundMapper -> becomes 422 JSON.
+            throw new LinkedResourceNotFoundException("Room", sensor.getRoomId());
         }
 
         if (sensor.getStatus() == null || sensor.getStatus().isBlank()) {
@@ -92,11 +79,7 @@ public class SensorResource {
         }
 
         if (sensorStore.exists(sensor.getId())) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("status", 409);
-            body.put("error", "Conflict");
-            body.put("message", "A sensor with id '" + sensor.getId() + "' already exists.");
-            return Response.status(Response.Status.CONFLICT).entity(body).build();
+            throw conflict("A sensor with id '" + sensor.getId() + "' already exists.");
         }
 
         sensorStore.save(sensor);
@@ -117,7 +100,7 @@ public class SensorResource {
     public Response deleteSensor(@PathParam("sensorId") String sensorId) {
         Sensor sensor = sensorStore.findById(sensorId);
         if (sensor == null) {
-            return notFound("Sensor with id '" + sensorId + "' does not exist.");
+            throw notFound("Sensor with id '" + sensorId + "' does not exist.");
         }
 
         Room room = roomStore.findById(sensor.getRoomId());
@@ -129,40 +112,34 @@ public class SensorResource {
         return Response.noContent().build();
     }
 
-    // ------------------------------------------------------------------
-    // SUB-RESOURCE LOCATOR
-    // ------------------------------------------------------------------
-    //
-    // Note: this method has @Path but NO @GET/@POST/etc. That is what makes
-    // it a "sub-resource locator" instead of a regular resource method.
-    //
-    // For any request matching /sensors/{sensorId}/readings (and deeper),
-    // JAX-RS calls this method, takes the returned object, and dispatches
-    // the remainder of the path to methods on that object.
-    //
-    // This delegation keeps SensorResource focused on sensor concerns, and
-    // isolates all reading-related logic inside SensorReadingResource.
-    // ------------------------------------------------------------------
     @Path("/{sensorId}/readings")
     public SensorReadingResource getReadingResource(@PathParam("sensorId") String sensorId) {
         return new SensorReadingResource(sensorId);
     }
 
-    // ----- small JSON error helpers -----
+    // ----- helpers -----
 
-    private Response notFound(String message) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", 404);
-        body.put("error", "Not Found");
-        body.put("message", message);
-        return Response.status(Response.Status.NOT_FOUND).entity(body).build();
+    private WebApplicationException notFound(String message) {
+        return new WebApplicationException(
+                Response.status(Response.Status.NOT_FOUND)
+                        .type(MediaType.APPLICATION_JSON)
+                        .entity(new ErrorResponse(404, "Not Found", message))
+                        .build());
     }
 
-    private Response badRequest(String message) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", 400);
-        body.put("error", "Bad Request");
-        body.put("message", message);
-        return Response.status(Response.Status.BAD_REQUEST).entity(body).build();
+    private WebApplicationException badRequest(String message) {
+        return new WebApplicationException(
+                Response.status(Response.Status.BAD_REQUEST)
+                        .type(MediaType.APPLICATION_JSON)
+                        .entity(new ErrorResponse(400, "Bad Request", message))
+                        .build());
+    }
+
+    private WebApplicationException conflict(String message) {
+        return new WebApplicationException(
+                Response.status(Response.Status.CONFLICT)
+                        .type(MediaType.APPLICATION_JSON)
+                        .entity(new ErrorResponse(409, "Conflict", message))
+                        .build());
     }
 }
