@@ -22,17 +22,17 @@ import jakarta.ws.rs.core.UriInfo;
 import java.net.URI;
 import java.util.Collection;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
  * Manages the /sensors collection.
  *
- *   GET  /sensors                -> list all sensors (optionally filter by ?type=...)
- *   GET  /sensors/{sensorId}     -> fetch a specific sensor
- *   POST /sensors                -> create a new sensor (validates roomId exists)
- *   DELETE /sensors/{sensorId}   -> remove a sensor and detach it from its room
+ * GET /sensors -> list all sensors (filter by ?type=...)
+ * GET /sensors/{sensorId} -> fetch a specific sensor
+ * POST /sensors -> create (validates roomId exists)
+ * DELETE /sensors/{sensorId} -> remove, detaches from parent room
+ * {sensorId}/readings -> delegated to SensorReadingResource
  */
 @Path("/sensors")
 @Produces(MediaType.APPLICATION_JSON)
@@ -42,10 +42,6 @@ public class SensorResource {
     private final SensorStore sensorStore = SensorStore.getInstance();
     private final RoomStore roomStore = RoomStore.getInstance();
 
-    /**
-     * GET /sensors or GET /sensors?type=CO2
-     * The optional @QueryParam("type") filters the collection server-side.
-     */
     @GET
     public Response getAllSensors(@QueryParam("type") String type) {
         Collection<Sensor> result;
@@ -69,7 +65,6 @@ public class SensorResource {
 
     @POST
     public Response createSensor(Sensor sensor, @Context UriInfo uriInfo) {
-        // Validate required fields.
         if (sensor == null || sensor.getType() == null || sensor.getType().isBlank()) {
             return badRequest("Field 'type' is required.");
         }
@@ -77,8 +72,6 @@ public class SensorResource {
             return badRequest("Field 'roomId' is required.");
         }
 
-        // Validate that the referenced room exists.
-        // (Part 5 will refactor this into a LinkedResourceNotFoundException + ExceptionMapper.)
         Room room = roomStore.findById(sensor.getRoomId());
         if (room == null) {
             Map<String, Object> body = new LinkedHashMap<>();
@@ -90,17 +83,14 @@ public class SensorResource {
             return Response.status(422).entity(body).build();
         }
 
-        // Default status if the client didn't provide one.
         if (sensor.getStatus() == null || sensor.getStatus().isBlank()) {
             sensor.setStatus("ACTIVE");
         }
 
-        // Auto-generate an ID if the client didn't supply one.
         if (sensor.getId() == null || sensor.getId().isBlank()) {
             sensor.setId("SENSOR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
         }
 
-        // Reject duplicate IDs.
         if (sensorStore.exists(sensor.getId())) {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("status", 409);
@@ -109,11 +99,8 @@ public class SensorResource {
             return Response.status(Response.Status.CONFLICT).entity(body).build();
         }
 
-        // Persist the sensor.
         sensorStore.save(sensor);
 
-        // IMPORTANT: link it back to the parent room so the deletion-safety check
-        // in RoomResource actually has something to block against.
         if (!room.getSensorIds().contains(sensor.getId())) {
             room.getSensorIds().add(sensor.getId());
         }
@@ -133,7 +120,6 @@ public class SensorResource {
             return notFound("Sensor with id '" + sensorId + "' does not exist.");
         }
 
-        // Detach from the parent room's sensor list, so the room becomes deletable.
         Room room = roomStore.findById(sensor.getRoomId());
         if (room != null) {
             room.getSensorIds().remove(sensorId);
@@ -141,6 +127,25 @@ public class SensorResource {
 
         sensorStore.delete(sensorId);
         return Response.noContent().build();
+    }
+
+    // ------------------------------------------------------------------
+    // SUB-RESOURCE LOCATOR
+    // ------------------------------------------------------------------
+    //
+    // Note: this method has @Path but NO @GET/@POST/etc. That is what makes
+    // it a "sub-resource locator" instead of a regular resource method.
+    //
+    // For any request matching /sensors/{sensorId}/readings (and deeper),
+    // JAX-RS calls this method, takes the returned object, and dispatches
+    // the remainder of the path to methods on that object.
+    //
+    // This delegation keeps SensorResource focused on sensor concerns, and
+    // isolates all reading-related logic inside SensorReadingResource.
+    // ------------------------------------------------------------------
+    @Path("/{sensorId}/readings")
+    public SensorReadingResource getReadingResource(@PathParam("sensorId") String sensorId) {
+        return new SensorReadingResource(sensorId);
     }
 
     // ----- small JSON error helpers -----
